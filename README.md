@@ -291,8 +291,16 @@ JSON 配置（部分客户端直接编辑配置文件；适用于完成第 3 步
 
 ```powershell
 # 运行全部测试（全部 Mock，不联网、不需要凭证）
-.\.venv\Scripts\python.exe -m pytest -q      # 当前 317 passed
+.\.venv\Scripts\python.exe -m pytest -q      # 当前 318 passed（9 skipped）
 ```
+
+> **测试不会随日历日期漂移（issue #2）**：`tests/test_detail_tool.py` 的定位窗口用合成数据，
+> 依赖一个固定的"现在"锚点——常量 `NOW_MS` 配合 `_FixedDatetime` 类，测试内
+> `patch("src.huawei_health_mcp.server.datetime", _FixedDatetime)` 让服务端始终以该锚点算窗口，
+> 而非真实系统时间。如此即便真实日期越过锚点（原本会把 60 天前的合成活动滤出窗口、用例必失败），
+> 结果依然确定。`_FixedDatetime.now(tz=None)` 返回本地时区 naive 时间，与真实 `datetime.now()` 语义一致；
+> 回归测试 `test_fixed_now_anchor_and_window_independent_of_real_clock` 把"窗口与真实墙钟无关"这条契约锁死。
+
 
 ```
 src/huawei_health_mcp/
