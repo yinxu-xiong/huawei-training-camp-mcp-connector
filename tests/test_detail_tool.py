@@ -249,7 +249,10 @@ class _FixedDatetime(datetime):
     @classmethod
     def now(cls, tz=None):
         if tz is None:
-            return _FIXED_NOW.replace(tzinfo=None)
+            # 忠实于 datetime.now() 的语义：返回本地时区的 naive datetime。
+            # 旧实现返回 _FIXED_NOW 的 UTC-naive，在本地时区路径（如 _local_midnight）
+            # 下会让窗口计算偏移；改成先按本地时区换算再去 tzinfo，语义才一致。
+            return _FIXED_NOW.astimezone().replace(tzinfo=None)
         return _FIXED_NOW.astimezone(tz)
 
 WINDOW_RECORDS = [
@@ -311,3 +314,34 @@ def test_detail_lookup_rejects_invalid_window():
         get_activity_detail(activity_id=OLD_ID, lookback_days=0)
     with pytest.raises(ValueError):
         get_activity_detail(activity_id=OLD_ID, lookback_days=9999)
+
+
+def test_fixed_now_anchor_and_window_independent_of_real_clock():
+    """issue #2 回归：定位窗口必须锚定 _FIXED_NOW，与真实墙钟/日历日期无关。
+
+    锁定两层契约：
+      1. _FixedDatetime.now(timezone.utc) 恒等于锚点 _FIXED_NOW；
+         _FixedDatetime.now()（tz=None）忠实于 datetime.now()：本地时区 naive。
+      2. 端到端：即便把真实墙钟拨到锚点之后 400 天，server 发出的列表请求窗口
+         起点仍等于锚点 - 30 天——不会随真实日历漂移而把旧活动过滤掉。
+    """
+    # 1) 锚点恒等与 tz=None 语义忠实性
+    assert _FixedDatetime.now(timezone.utc) == _FIXED_NOW
+    local_naive = _FixedDatetime.now()
+    assert local_naive.tzinfo is None
+    assert local_naive == _FIXED_NOW.astimezone().replace(tzinfo=None)
+
+    # 2) 端到端：真实墙钟漂移不应影响 server 的窗口计算
+    detail_body = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    captured: dict = {}
+    mock_client = _make_mock_client(_window_aware_handler(captured, detail_body))
+    drifted_real_now_ms = NOW_MS + 400 * 86400 * 1000
+    with patch("time.time", return_value=drifted_real_now_ms / 1000), patch(
+        "src.huawei_health_mcp.server.create_htc_client", return_value=mock_client
+    ), patch("src.huawei_health_mcp.server.datetime", _FixedDatetime):
+        with pytest.raises(ValueError):
+            # 默认 30 天窗口应排除 60 天前的旧活动（锚点语义），而非因墙钟漂移改变
+            get_activity_detail(activity_id=OLD_ID)
+
+    anchored_window_start_ms = NOW_MS - 30 * 86400 * 1000
+    assert captured["list"]["startTime"] == str(anchored_window_start_ms)
